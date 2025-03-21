@@ -42,6 +42,24 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Initialize session state
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'translation_model' not in st.session_state:
+    st.session_state.translation_model = None
+if 'translation_tokenizer' not in st.session_state:
+    st.session_state.translation_tokenizer = None
+if 'embeddings' not in st.session_state:
+    st.session_state.embeddings = None
+if 'vectorstore' not in st.session_state:
+    st.session_state.vectorstore = None
+if 'llm' not in st.session_state:
+    st.session_state.llm = None
+if 'qa_chain' not in st.session_state:
+    st.session_state.qa_chain = None
+if 'api_key_entered' not in st.session_state:
+    st.session_state.api_key_entered = False
+
 # Initialize global resources
 @st.cache_resource
 def get_api_key():
@@ -79,23 +97,24 @@ def initialize_embeddings():
         logger.error(f"Error initializing embeddings model: {e}")
         return None
 
+# Note the leading underscore on _embeddings to prevent hashing
 @st.cache_resource
-def load_vectorstore(embeddings):
+def load_vectorstore(_embeddings):
     """Load the FAISS vector database."""
     try:
-        vectorstore = FAISS.load_local(INDEX_PATH, embeddings)
+        vectorstore = FAISS.load_local(INDEX_PATH, _embeddings)
         logger.info(f"Loaded FAISS index from {INDEX_PATH}")
         return vectorstore
     except Exception as e:
         logger.error(f"Error loading vector database: {e}")
         # Create a dummy vector store if the real one fails to load
         documents = [{"page_content": "This is a fallback document.", "metadata": {"source": "fallback", "page": 1}}]
-        return FAISS.from_texts([doc["page_content"] for doc in documents], embeddings, [doc["metadata"] for doc in documents])
+        return FAISS.from_texts([doc["page_content"] for doc in documents], _embeddings, [doc["metadata"] for doc in documents])
 
 @st.cache_resource
-def initialize_llm(api_key):
+def initialize_llm(_api_key):
     """Initialize the Groq LLM with Llama 70B."""
-    if not api_key:
+    if not _api_key:
         logger.error("No API key provided for Groq")
         return None
     
@@ -103,7 +122,7 @@ def initialize_llm(api_key):
         llm = ChatGroq(
             model_name=MODEL_NAME,
             temperature=0.2,
-            groq_api_key=api_key
+            groq_api_key=_api_key
         )
         logger.info(f"Initialized {MODEL_NAME} model")
         return llm
@@ -111,8 +130,9 @@ def initialize_llm(api_key):
         logger.error(f"Error initializing LLM model: {e}")
         return None
 
+# Note the leading underscores on _llm and _vectorstore to prevent hashing
 @st.cache_resource
-def create_qa_chain(llm, vectorstore):
+def create_qa_chain(_llm, _vectorstore):
     """Create a retrieval QA chain with the vector database and LLM."""
     try:
         # Create a custom prompt template for legal document retrieval
@@ -136,9 +156,9 @@ def create_qa_chain(llm, vectorstore):
         
         # Create the QA chain
         qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
+            llm=_llm,
             chain_type="stuff",
-            retriever=vectorstore.as_retriever(search_kwargs={"k": 5}),
+            retriever=_vectorstore.as_retriever(search_kwargs={"k": 5}),
             return_source_documents=True,
             chain_type_kwargs={"prompt": PROMPT}
         )
@@ -242,9 +262,92 @@ def process_query(query: str, qa_chain, translation_model, translation_tokenizer
             
             return error_msg
 
-# Initialize session state
-if 'history' not in st.session_state:
-    st.session_state.history = []
+def initialize_resources():
+    """Initialize all required resources."""
+    # Get API key
+    api_key = get_api_key()
+    
+    # If API key not found, show input field
+    if not api_key and not st.session_state.api_key_entered:
+        with st.sidebar:
+            input_api_key = st.text_input(
+                "Enter your Groq API Key:",
+                type="password",
+                key="api_key_input"
+            )
+            
+            if input_api_key:
+                api_key = input_api_key
+                os.environ["GROQ_API_KEY"] = api_key
+                st.session_state.api_key_entered = True
+                st.experimental_rerun()
+    
+    if not api_key and not st.session_state.api_key_entered:
+        st.sidebar.warning("Please enter your Groq API Key to continue.")
+        return False, None, None, None, None, None
+    
+    # Load translation model
+    if st.session_state.translation_model is None or st.session_state.translation_tokenizer is None:
+        with st.spinner("Loading translation model..."):
+            model, tokenizer = load_translation_model()
+            st.session_state.translation_model = model
+            st.session_state.translation_tokenizer = tokenizer
+    
+    # Initialize embeddings
+    if st.session_state.embeddings is None:
+        with st.spinner("Initializing embeddings model..."):
+            embeddings = initialize_embeddings()
+            st.session_state.embeddings = embeddings
+    
+    # Load vector store
+    if st.session_state.vectorstore is None and st.session_state.embeddings is not None:
+        with st.spinner("Loading vector database..."):
+            vectorstore = load_vectorstore(st.session_state.embeddings)
+            st.session_state.vectorstore = vectorstore
+    
+    # Initialize LLM
+    if st.session_state.llm is None and api_key:
+        with st.spinner("Initializing LLM model..."):
+            llm = initialize_llm(api_key)
+            st.session_state.llm = llm
+    
+    # Create QA chain
+    if (st.session_state.qa_chain is None and 
+        st.session_state.llm is not None and 
+        st.session_state.vectorstore is not None):
+        with st.spinner("Creating QA chain..."):
+            qa_chain = create_qa_chain(st.session_state.llm, st.session_state.vectorstore)
+            st.session_state.qa_chain = qa_chain
+    
+    # Check if everything is loaded properly
+    all_loaded = (
+        st.session_state.translation_model is not None and 
+        st.session_state.translation_tokenizer is not None and 
+        st.session_state.embeddings is not None and 
+        st.session_state.vectorstore is not None and 
+        st.session_state.llm is not None and 
+        st.session_state.qa_chain is not None
+    )
+    
+    return all_loaded, api_key, st.session_state.translation_model, st.session_state.translation_tokenizer, st.session_state.qa_chain
+
+def display_status():
+    """Display the status of all components."""
+    st.header("System Status")
+    
+    # Display component status
+    components = {
+        "Translation Model": st.session_state.translation_model is not None,
+        "Vector Database": st.session_state.vectorstore is not None,
+        "LLM Connection": st.session_state.llm is not None,
+        "QA System": st.session_state.qa_chain is not None
+    }
+    
+    for component, loaded in components.items():
+        if loaded:
+            st.success(f"{component} loaded ✓")
+        else:
+            st.error(f"{component} failed to load ✗")
 
 def main():
     """Main function to run the Streamlit app."""
@@ -252,52 +355,11 @@ def main():
     st.subheader("Ask questions about police legal procedures in English or Tamil")
     
     # Initialize all resources at startup
-    with st.spinner("Loading resources..."):
-        # Get API key
-        api_key = get_api_key()
-        
-        # If API key not found, show input field
-        if not api_key:
-            api_key = st.sidebar.text_input(
-                "Enter your Groq API Key:",
-                type="password",
-                key="api_key_input"
-            )
-            
-            if api_key:
-                os.environ["GROQ_API_KEY"] = api_key
-            else:
-                st.sidebar.warning("Please enter your Groq API Key to continue.")
-                return
-        
-        # Load resources
-        translation_model, translation_tokenizer = load_translation_model()
-        embeddings = initialize_embeddings()
-        vectorstore = load_vectorstore(embeddings) if embeddings else None
-        llm = initialize_llm(api_key)
-        qa_chain = create_qa_chain(llm, vectorstore) if llm and vectorstore else None
-        
-        # Check if everything is loaded properly
-        all_loaded = translation_model and translation_tokenizer and embeddings and vectorstore and llm and qa_chain
-        if not all_loaded:
-            st.error("Could not initialize all required components. Some features may not work correctly.")
+    all_loaded, api_key, translation_model, translation_tokenizer, qa_chain = initialize_resources()
     
     # Sidebar for info and examples
     with st.sidebar:
-        st.header("System Status")
-        
-        # Display component status
-        components = {
-            "Translation Model": translation_model is not None,
-            "Vector Database": vectorstore is not None,
-            "LLM Connection": llm is not None
-        }
-        
-        for component, loaded in components.items():
-            if loaded:
-                st.success(f"{component} loaded ✓")
-            else:
-                st.error(f"{component} failed to load ✗")
+        display_status()
         
         # Language examples
         st.header("Example Questions")
@@ -315,6 +377,10 @@ def main():
         if st.button("Clear Conversation History"):
             st.session_state.history = []
             st.success("Conversation history cleared")
+    
+    # Warning if not all components are loaded
+    if not all_loaded:
+        st.warning("Some components have not loaded properly. The application may not function correctly.")
     
     # Chat interface
     chat_container = st.container()
