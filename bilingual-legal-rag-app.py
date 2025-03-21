@@ -44,7 +44,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize session state
+# Initialize session state - reset API_keys_entered to False on every load
 if 'history' not in st.session_state:
     st.session_state.history = []
 if 'translation_model' not in st.session_state:
@@ -61,18 +61,24 @@ if 'qa_chain' not in st.session_state:
     st.session_state.qa_chain = None
 if 'google_search_api' not in st.session_state:
     st.session_state.google_search_api = None
-if 'api_keys_entered' not in st.session_state:
-    st.session_state.api_keys_entered = False
 
-# Initialize global resources
-@st.cache_resource
+# Always reset the API keys entered state on refresh
+st.session_state.api_keys_entered = False
+
+# Function to get API keys - no caching to ensure fresh input on each refresh
 def get_api_keys():
     """Get API keys from environment variables or secrets."""
     keys = {
-        "groq_api_key": os.environ.get("GROQ_API_KEY") or (st.secrets["GROQ_API_KEY"] if "GROQ_API_KEY" in st.secrets else None),
-        "google_api_key": os.environ.get("GOOGLE_API_KEY") or (st.secrets["GOOGLE_API_KEY"] if "GOOGLE_API_KEY" in st.secrets else None),
-        "search_engine_id": os.environ.get("SEARCH_ENGINE_ID") or (st.secrets["SEARCH_ENGINE_ID"] if "SEARCH_ENGINE_ID" in st.secrets else None)
+        "groq_api_key": None, 
+        "google_api_key": None,
+        "search_engine_id": None
     }
+    
+    # Try to get from environment variables or secrets, but don't store in session state
+    keys["groq_api_key"] = os.environ.get("GROQ_API_KEY") or (st.secrets["GROQ_API_KEY"] if "GROQ_API_KEY" in st.secrets else None)
+    keys["google_api_key"] = os.environ.get("GOOGLE_API_KEY") or (st.secrets["GOOGLE_API_KEY"] if "GOOGLE_API_KEY" in st.secrets else None) 
+    keys["search_engine_id"] = os.environ.get("SEARCH_ENGINE_ID") or (st.secrets["SEARCH_ENGINE_ID"] if "SEARCH_ENGINE_ID" in st.secrets else None)
+    
     return keys
 
 @st.cache_resource
@@ -109,17 +115,25 @@ def initialize_embeddings():
 @st.cache_resource
 def load_vectorstore(_embeddings):
     """Load the FAISS vector database."""
+    if _embeddings is None:
+        logger.error("Cannot load vector store: embeddings model is None")
+        return None
+        
     try:
         vectorstore = FAISS.load_local(INDEX_PATH, _embeddings)
         logger.info(f"Loaded FAISS index from {INDEX_PATH}")
         return vectorstore
     except Exception as e:
         logger.error(f"Error loading vector database: {e}")
-        # Create a dummy vector store if the real one fails to load
-        documents = [{"page_content": "This is a fallback document.", "metadata": {"source": "fallback", "page": 1}}]
-        return FAISS.from_texts([doc["page_content"] for doc in documents], _embeddings, [doc["metadata"] for doc in documents])
+        try:
+            # Create a dummy vector store if the real one fails to load
+            documents = [{"page_content": "This is a fallback document.", "metadata": {"source": "fallback", "page": 1}}]
+            return FAISS.from_texts([doc["page_content"] for doc in documents], _embeddings, [doc["metadata"] for doc in documents])
+        except Exception as e2:
+            logger.error(f"Failed to create fallback vector database: {e2}")
+            return None
 
-@st.cache_resource
+# Don't cache LLM initialization so it uses fresh API keys each time
 def initialize_llm(_api_key):
     """Initialize the Groq LLM with Llama 70B."""
     if not _api_key:
@@ -138,7 +152,7 @@ def initialize_llm(_api_key):
         logger.error(f"Error initializing LLM model: {e}")
         return None
 
-@st.cache_resource
+# Don't cache Google Search initialization so it uses fresh API keys each time
 def initialize_google_search(_api_key, _search_engine_id):
     """Initialize the Google Custom Search API."""
     if not _api_key or not _search_engine_id:
@@ -156,6 +170,10 @@ def initialize_google_search(_api_key, _search_engine_id):
 @st.cache_resource
 def create_qa_chain(_llm, _vectorstore):
     """Create a retrieval QA chain with the vector database and LLM."""
+    if _llm is None or _vectorstore is None:
+        logger.error("Cannot create QA chain: LLM or vector store is None")
+        return None
+        
     try:
         # Create a custom prompt template for legal document retrieval
         prompt_template = """
@@ -348,54 +366,69 @@ def process_query(query: str, qa_chain, translation_model, translation_tokenizer
 
 def initialize_resources():
     """Initialize all required resources."""
-    # Get API keys
+    # Get API keys - don't cache this result
     api_keys = get_api_keys()
     
-    # If API keys not found, show input fields
-    if (not api_keys["groq_api_key"] or not api_keys["google_api_key"] or not api_keys["search_engine_id"]) and not st.session_state.api_keys_entered:
-        with st.sidebar:
-            st.subheader("API Configuration")
-            
-            input_groq_api_key = st.text_input(
-                "Enter your Groq API Key:",
-                type="password",
-                key="groq_api_key_input"
-            )
-            
-            input_google_api_key = st.text_input(
-                "Enter your Google API Key:",
-                type="password",
-                key="google_api_key_input"
-            )
-            
-            input_search_engine_id = st.text_input(
-                "Enter your Search Engine ID:",
-                type="password",
-                key="search_engine_id_input"
-            )
-            
-            if st.button("Submit API Keys"):
-                if input_groq_api_key and input_google_api_key and input_search_engine_id:
-                    # Update environment variables
-                    os.environ["GROQ_API_KEY"] = input_groq_api_key
+    # Always show input fields to ensure keys are requested on each refresh
+    with st.sidebar:
+        st.subheader("API Configuration")
+        
+        input_groq_api_key = st.text_input(
+            "Enter your Groq API Key:",
+            type="password",
+            key="groq_api_key_input"
+        )
+        
+        input_google_api_key = st.text_input(
+            "Enter your Google API Key:",
+            type="password",
+            key="google_api_key_input"
+        )
+        
+        input_search_engine_id = st.text_input(
+            "Enter your Search Engine ID:",
+            type="password",
+            key="search_engine_id_input"
+        )
+        
+        if st.button("Submit API Keys"):
+            if input_groq_api_key:
+                # Update environment variables
+                os.environ["GROQ_API_KEY"] = input_groq_api_key
+                api_keys["groq_api_key"] = input_groq_api_key
+                
+                if input_google_api_key:
                     os.environ["GOOGLE_API_KEY"] = input_google_api_key
-                    os.environ["SEARCH_ENGINE_ID"] = input_search_engine_id
-                    
-                    # Update API keys
-                    api_keys["groq_api_key"] = input_groq_api_key
                     api_keys["google_api_key"] = input_google_api_key
+                
+                if input_search_engine_id:
+                    os.environ["SEARCH_ENGINE_ID"] = input_search_engine_id
                     api_keys["search_engine_id"] = input_search_engine_id
-                    
-                    st.session_state.api_keys_entered = True
-                    st.success("API keys successfully submitted!")
-                    # Replace experimental_rerun with rerun
-                    st.rerun()
-                else:
-                    st.error("Please enter all API keys.")
+                
+                st.session_state.api_keys_entered = True
+                st.success("API keys successfully submitted!")
+                
+                # Clean up previous resources that depend on API keys
+                st.session_state.llm = None
+                st.session_state.qa_chain = None
+                st.session_state.google_search_api = None
+                
+                # Replace experimental_rerun with rerun
+                st.rerun()
+            else:
+                st.error("Please enter at least the Groq API key to continue.")
     
-    if not api_keys["groq_api_key"] and not st.session_state.api_keys_entered:
-        st.sidebar.warning("Please enter your API keys to continue.")
-        return False, None, None, None, None, None
+    # Always check for a valid Groq API key, even if keys were entered
+    if not api_keys["groq_api_key"] and not input_groq_api_key:
+        st.sidebar.warning("Please enter your Groq API key to continue.")
+        return False, api_keys, None, None, None, None
+    
+    # If keys were submitted in the form, use those instead of environment/secrets
+    if st.session_state.api_keys_entered:
+        # This will use the form values if they exist, otherwise fall back to environment/secrets
+        api_keys["groq_api_key"] = input_groq_api_key or api_keys["groq_api_key"]
+        api_keys["google_api_key"] = input_google_api_key or api_keys["google_api_key"]
+        api_keys["search_engine_id"] = input_search_engine_id or api_keys["search_engine_id"]
     
     # Load translation model
     if st.session_state.translation_model is None or st.session_state.translation_tokenizer is None:
@@ -416,19 +449,20 @@ def initialize_resources():
             vectorstore = load_vectorstore(st.session_state.embeddings)
             st.session_state.vectorstore = vectorstore
     
-    # Initialize LLM
-    if st.session_state.llm is None and api_keys["groq_api_key"]:
-        with st.spinner("Initializing LLM model..."):
-            llm = initialize_llm(api_keys["groq_api_key"])
-            st.session_state.llm = llm
+    # Initialize LLM - always reinitialize with current API key
+    with st.spinner("Initializing LLM model..."):
+        llm = initialize_llm(api_keys["groq_api_key"])
+        st.session_state.llm = llm
     
-    # Initialize Google Search API
-    if st.session_state.google_search_api is None and api_keys["google_api_key"] and api_keys["search_engine_id"]:
+    # Initialize Google Search API - always reinitialize with current API keys
+    if api_keys["google_api_key"] and api_keys["search_engine_id"]:
         with st.spinner("Initializing Google Search API..."):
             google_search_api = initialize_google_search(api_keys["google_api_key"], api_keys["search_engine_id"])
             st.session_state.google_search_api = google_search_api
+    else:
+        st.session_state.google_search_api = None
     
-    # Create QA chain
+    # Create QA chain - recreate if LLM or vectorstore changed
     if (st.session_state.qa_chain is None and 
         st.session_state.llm is not None and 
         st.session_state.vectorstore is not None):
@@ -437,13 +471,22 @@ def initialize_resources():
             st.session_state.qa_chain = qa_chain
     
     # Check if everything is loaded properly
-    all_loaded = (
+    translation_loaded = (
         st.session_state.translation_model is not None and 
-        st.session_state.translation_tokenizer is not None and 
-        st.session_state.embeddings is not None and 
-        st.session_state.vectorstore is not None and 
-        st.session_state.llm is not None and 
-        st.session_state.qa_chain is not None
+        st.session_state.translation_tokenizer is not None
+    )
+    
+    embeddings_loaded = st.session_state.embeddings is not None
+    vectorstore_loaded = st.session_state.vectorstore is not None
+    llm_loaded = st.session_state.llm is not None
+    qa_chain_loaded = st.session_state.qa_chain is not None
+    
+    all_loaded = (
+        translation_loaded and 
+        embeddings_loaded and 
+        vectorstore_loaded and 
+        llm_loaded and 
+        qa_chain_loaded
     )
     
     google_search_available = st.session_state.google_search_api is not None
@@ -522,34 +565,38 @@ def main():
             else:
                 st.chat_message("assistant").write(message)
     
-    # Query input
-    user_query = st.chat_input("Ask a question in English or Tamil...")
-    
-    if user_query:
-        # Add user query to history
-        st.session_state.history.append(("user", user_query))
+    # Only enable chat input if core components are loaded
+    if st.session_state.llm is not None and st.session_state.qa_chain is not None:
+        # Query input
+        user_query = st.chat_input("Ask a question in English or Tamil...")
         
-        # Display user query
-        st.chat_message("user").write(user_query)
-        
-        # Process the query
-        google_search_to_use = google_search_api if use_google_search else None
-        search_engine_id_to_use = api_keys["search_engine_id"] if use_google_search else None
-        
-        response = process_query(
-            user_query, 
-            qa_chain, 
-            translation_model, 
-            translation_tokenizer,
-            google_search_to_use,
-            search_engine_id_to_use
-        )
-        
-        # Add response to history
-        st.session_state.history.append(("assistant", response))
-        
-        # Display response
-        st.chat_message("assistant").write(response)
+        if user_query:
+            # Add user query to history
+            st.session_state.history.append(("user", user_query))
+            
+            # Display user query
+            st.chat_message("user").write(user_query)
+            
+            # Process the query
+            google_search_to_use = google_search_api if use_google_search else None
+            search_engine_id_to_use = api_keys["search_engine_id"] if use_google_search else None
+            
+            response = process_query(
+                user_query, 
+                qa_chain, 
+                translation_model, 
+                translation_tokenizer,
+                google_search_to_use,
+                search_engine_id_to_use
+            )
+            
+            # Add response to history
+            st.session_state.history.append(("assistant", response))
+            
+            # Display response
+            st.chat_message("assistant").write(response)
+    else:
+        st.error("Please provide a valid Groq API key to use the chat interface.")
 
 if __name__ == "__main__":
     main()
