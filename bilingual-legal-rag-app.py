@@ -281,7 +281,11 @@ def process_query(query: str, qa_chain, translation_model, translation_tokenizer
     
     if original_language == "tamil":
         with st.spinner("Translating your query from Tamil to English..."):
-            english_query = translate_text(query, "tamil", "english", translation_model, translation_tokenizer)
+            try:
+                english_query = translate_text(query, "tamil", "english", translation_model, translation_tokenizer)
+            except Exception as e:
+                logger.error(f"Error translating query: {e}")
+                return "Sorry, I encountered an error while translating your query."
     
     # Process the query with both vector search and Google search
     with st.spinner("Searching legal documents and online resources..."):
@@ -300,12 +304,15 @@ def process_query(query: str, qa_chain, translation_model, translation_tokenizer
             # Then search Google if API is available
             google_results_text = ""
             if google_search_api and search_engine_id:
-                search_results = perform_google_search(english_query, google_search_api, search_engine_id)
-                
-                if search_results:
-                    google_results_text = "\n\nWeb Sources:\n"
-                    for i, result in enumerate(search_results):
-                        google_results_text += f"{i+1}. {result['title']}: {result['link']}\n"
+                try:
+                    search_results = perform_google_search(english_query, google_search_api, search_engine_id)
+                    
+                    if search_results:
+                        google_results_text = "\n\nWeb Sources:\n"
+                        for i, result in enumerate(search_results):
+                            google_results_text += f"{i+1}. {result['title']}: {result['link']}\n"
+                except Exception as e:
+                    logger.error(f"Error performing Google search: {e}")
             
             # Format final response
             response = f"{document_answer}\n{sources_text}"
@@ -313,14 +320,17 @@ def process_query(query: str, qa_chain, translation_model, translation_tokenizer
                 response += f"{google_results_text}"
             
             # Validate response against guidelines
-            # Simplified validation - in a real-world scenario, you'd have a more robust system
             if "I don't know" in document_answer and not google_results_text:
                 response = "I'm sorry, but I cannot provide information on that. Please refer to the nearest police station or legal authority for assistance."
             
             # Translate response back to Tamil if original query was in Tamil
             if original_language == "tamil":
                 with st.spinner("Translating response to Tamil..."):
-                    response = translate_text(response, "english", "tamil", translation_model, translation_tokenizer)
+                    try:
+                        response = translate_text(response, "english", "tamil", translation_model, translation_tokenizer)
+                    except Exception as e:
+                        logger.error(f"Error translating response: {e}")
+                        return "Sorry, I encountered an error while translating the response."
             
             return response
         except Exception as e:
@@ -329,7 +339,10 @@ def process_query(query: str, qa_chain, translation_model, translation_tokenizer
             
             # Translate error message if original query was in Tamil
             if original_language == "tamil":
-                error_msg = translate_text(error_msg, "english", "tamil", translation_model, translation_tokenizer)
+                try:
+                    error_msg = translate_text(error_msg, "english", "tamil", translation_model, translation_tokenizer)
+                except Exception as e:
+                    logger.error(f"Error translating error message: {e}")
             
             return error_msg
 
