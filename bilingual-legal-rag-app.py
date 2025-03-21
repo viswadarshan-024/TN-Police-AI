@@ -93,12 +93,14 @@ def load_translation_model():
 def initialize_embeddings():
     """Initialize the embeddings model."""
     try:
-        model_kwargs = {'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
+        # Use 'cpu' by default to avoid CUDA issues
+        device = 'cpu'
+        model_kwargs = {'device': device}
         embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL,
             model_kwargs=model_kwargs
         )
-        logger.info(f"Initialized embeddings model: {EMBEDDING_MODEL}")
+        logger.info(f"Initialized embeddings model: {EMBEDDING_MODEL} on {device}")
         return embeddings
     except Exception as e:
         logger.error(f"Error initializing embeddings model: {e}")
@@ -373,7 +375,8 @@ def initialize_resources():
                     
                     st.session_state.api_keys_entered = True
                     st.success("API keys successfully submitted!")
-                    st.experimental_rerun()
+                    # Replace experimental_rerun with rerun
+                    st.rerun()
                 else:
                     st.error("Please enter all API keys.")
     
