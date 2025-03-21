@@ -2,23 +2,16 @@ import streamlit as st
 import os
 import numpy as np
 import torch
-import faiss
-from googlesearch import search
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import re
-import time
-from typing import List, Dict, Any, Tuple
 import logging
 from langchain.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain.schema import Document
 from langchain.prompts import PromptTemplate
-from crewai import Agent, Task, Crew, Process
-from crewai.tools import Tool
-from langchain.tools import Tool as LangchainTool
 from langchain.chains import RetrievalQA
 import nltk
 from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
@@ -54,8 +47,6 @@ if 'llm' not in st.session_state:
     st.session_state.llm = None
 if 'qa_chain' not in st.session_state:
     st.session_state.qa_chain = None
-if 'crew' not in st.session_state:
-    st.session_state.crew = None
 if 'history' not in st.session_state:
     st.session_state.history = []
 
@@ -63,7 +54,7 @@ if 'history' not in st.session_state:
 def load_env_variables():
     """Load environment variables or prompt for API keys."""
     # For deployed app, use environment variables
-    groq_api_key =  os.environ.get("GROQ_API_KEY", None)  
+    groq_api_key = os.environ.get("GROQ_API_KEY", None)
     
     # For local development, prompt for API key if not found
     if not groq_api_key:
@@ -148,7 +139,7 @@ def initialize_embeddings():
     if st.session_state.embeddings is None:
         with st.spinner("Initializing embeddings model..."):
             try:
-                model_name = "sentence-transformers/all-mpnet-base-v2"
+                model_name = "sentence-transformers/all-MiniLM-L6-v2"
                 model_kwargs = {'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
                 
                 st.session_state.embeddings = HuggingFaceEmbeddings(
@@ -233,261 +224,15 @@ def create_qa_chain():
                 st.error(f"Error creating QA chain: {e}")
                 st.stop()
 
-# Web search tool
-def web_search_tool(query: str, num_results: int = 5) -> List[Dict[str, str]]:
-    """Tool for searching the web using Google."""
-    results = []
-    status_placeholder = st.empty()
-    
-    try:
-        status_placeholder.info(f"Searching the web for: {query}")
-        # Search Google for the query
-        search_results = list(search(query, num_results=num_results, lang="en"))
-        
-        for i, url in enumerate(search_results):
-            status_placeholder.info(f"Processing search result {i+1}/{len(search_results)}")
-            try:
-                # Get the content of the webpage
-                response = requests.get(url, timeout=5)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Extract title and text
-                title = soup.title.string if soup.title else "No title"
-                
-                # Extract main text content
-                paragraphs = soup.find_all('p')
-                text = '\n'.join([p.get_text() for p in paragraphs])
-                
-                # Truncate text if it's too long
-                if len(text) > 2000:
-                    text = text[:2000] + "..."
-                
-                # Get the domain name for display
-                domain = urlparse(url).netloc
-                
-                results.append({
-                    "url": url,
-                    "domain": domain,
-                    "title": title,
-                    "content": text
-                })
-            except Exception as e:
-                logger.warning(f"Error fetching {url}: {e}")
-                continue
-        
-        status_placeholder.empty()
-        return results
-    except Exception as e:
-        logger.error(f"Error performing web search: {e}")
-        status_placeholder.error("Web search failed")
-        return []
+# Web search function (simplified version without using Google Search API)
+def web_search(query, num_results=3):
+    """Simple web search simulation."""
+    # This is a placeholder - in a real app, you'd implement a proper web search
+    return f"Web search results for: {query}\n\nNote: Web search functionality is simplified in this version."
 
-# CrewAI setup
-def setup_query_analyzer_agent():
-    """Create an agent that analyzes and understands the user query."""
-    return Agent(
-        role="Query Analyzer",
-        goal="Understand user queries perfectly and determine the best search strategy",
-        backstory="""You are an expert at understanding user queries in both English and Tamil.
-        Your job is to analyze what the user is asking for, identify the core legal concepts,
-        and determine the best approach to find this information.""",
-        verbose=True,
-        allow_delegation=True,
-        tools=[],
-        llm=st.session_state.llm
-    )
-
-def setup_document_search_agent():
-    """Create an agent that searches through the vector database."""
-    # Create document search tool
-    document_search_tool = LangchainTool(
-        name="Legal Document Search",
-        func=lambda query: document_search(query),
-        description="Searches through police legal documents to find relevant information"
-    )
-    
-    return Agent(
-        role="Legal Document Expert",
-        goal="Find the most relevant legal information from the police document database",
-        backstory="""You are an expert in police procedures and legal documents with
-        extensive knowledge of the law. Your job is to search through the document
-        database to find the most accurate and relevant information.""",
-        verbose=True,
-        allow_delegation=True,
-        tools=[document_search_tool],
-        llm=st.session_state.llm
-    )
-
-def setup_web_search_agent():
-    """Create an agent that searches the web for supplementary information."""
-    # Create web search tool
-    web_search = LangchainTool(
-        name="Web Search",
-        func=lambda query: web_search_tool(query),
-        description="Searches the web for additional information on legal topics"
-    )
-    
-    return Agent(
-        role="Legal Web Researcher",
-        goal="Find supplemental information from the web to augment document knowledge",
-        backstory="""You are a researcher who specializes in finding recent legal information
-        online. Your job is to search the web for information that may not be present in the
-        document database or to verify the information found there.""",
-        verbose=True,
-        allow_delegation=True,
-        tools=[web_search],
-        llm=st.session_state.llm
-    )
-
-def setup_information_synthesizer_agent():
-    """Create an agent that synthesizes information from documents and web search."""
-    return Agent(
-        role="Information Synthesizer",
-        goal="Combine and analyze information from multiple sources to create accurate responses",
-        backstory="""You are an expert at combining information from different sources and
-        determining which is most relevant and accurate. You can identify contradictions,
-        verify facts, and ensure the final response is comprehensive and precise.""",
-        verbose=True,
-        allow_delegation=True,
-        tools=[],
-        llm=st.session_state.llm
-    )
-
-def setup_response_formatter_agent():
-    """Create an agent that formats the final response for the user."""
-    return Agent(
-        role="Response Formatter",
-        goal="Create well-structured, clear responses that answer the user's question completely",
-        backstory="""You are an expert communicator who knows how to structure information
-        in a clear, concise way. You ensure all the user's questions are addressed and
-        the information is presented in a logical, easy-to-understand format.""",
-        verbose=True,
-        allow_delegation=True,
-        tools=[],
-        llm=st.session_state.llm
-    )
-
-def document_search(query: str) -> str:
-    """Search through the vector database for relevant documents."""
-    try:
-        # Make sure QA chain is initialized
-        if st.session_state.qa_chain is None:
-            create_qa_chain()
-        
-        # Perform query
-        result = st.session_state.qa_chain({"query": query})
-        
-        # Format the response with sources
-        response = result["result"] + "\n\nSources:\n"
-        for i, doc in enumerate(result["source_documents"]):
-            source = doc.metadata.get("source", "Unknown")
-            page = doc.metadata.get("page", "Unknown")
-            response += f"{i+1}. {source}, Page {page}\n"
-            
-            # Add a short snippet from the document
-            snippet = doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
-            response += f"   Snippet: {snippet}\n\n"
-        
-        return response
-    except Exception as e:
-        logger.error(f"Error searching documents: {e}")
-        return f"Error searching documents: {e}"
-
-def setup_crew():
-    """Set up the CrewAI crew with all the agents and tasks."""
-    if st.session_state.crew is None:
-        # Make sure LLM is initialized
-        initialize_llm()
-        
-        with st.spinner("Setting up agent crew..."):
-            try:
-                # Create agents
-                query_analyzer = setup_query_analyzer_agent()
-                document_searcher = setup_document_search_agent()
-                web_searcher = setup_web_search_agent()
-                information_synthesizer = setup_information_synthesizer_agent()
-                response_formatter = setup_response_formatter_agent()
-                
-                # Create tasks
-                analyze_task = Task(
-                    description="""Analyze the user query to understand:
-                    1. What specific legal information they are seeking
-                    2. What key terms should be used for searching
-                    3. If the query needs to be reformulated for better search results
-                    4. If there are multiple questions that need to be addressed separately
-                    Provide a detailed analysis and a clear search strategy.""",
-                    agent=query_analyzer,
-                    expected_output="A detailed analysis of the query and search strategy",
-                    async_execution=False
-                )
-                
-                document_search_task = Task(
-                    description="""Search through police legal documents to find information relevant to the query.
-                    Use the strategy provided by the Query Analyzer.
-                    Search thoroughly and extract all relevant information.
-                    If the information seems incomplete, try different search terms.""",
-                    agent=document_searcher,
-                    expected_output="Detailed information from legal documents about the query",
-                    context=[analyze_task],
-                    async_execution=True
-                )
-                
-                web_search_task = Task(
-                    description="""Search the web for additional information related to the query.
-                    Use the strategy provided by the Query Analyzer.
-                    Focus on finding information that might not be in the documents or
-                    that can verify the information found in the documents.""",
-                    agent=web_searcher,
-                    expected_output="Relevant information from the web that supplements document knowledge",
-                    context=[analyze_task],
-                    async_execution=True
-                )
-                
-                synthesize_task = Task(
-                    description="""Compare and analyze the information from the documents and web search:
-                    1. Identify agreements and contradictions
-                    2. Determine which information is most relevant and accurate
-                    3. Identify if any important information is missing
-                    4. Decide if additional searches are needed
-                    If the information is incomplete or inconsistent, request additional searches.""",
-                    agent=information_synthesizer,
-                    expected_output="A synthesis of all information with analysis of reliability and completeness",
-                    context=[document_search_task, web_search_task],
-                    async_execution=False
-                )
-                
-                format_response_task = Task(
-                    description="""Create a final response for the user that:
-                    1. Directly addresses their query
-                    2. Is well-structured and easy to understand
-                    3. Includes all relevant information
-                    4. Cites sources appropriately
-                    5. Is formatted in a clear, readable way
-                    Ensure that the response is complete and accurate.""",
-                    agent=response_formatter,
-                    expected_output="A complete, well-formatted response to the user's query",
-                    context=[synthesize_task],
-                    async_execution=False
-                )
-                
-                # Create crew
-                st.session_state.crew = Crew(
-                    agents=[query_analyzer, document_searcher, web_searcher, information_synthesizer, response_formatter],
-                    tasks=[analyze_task, document_search_task, web_search_task, synthesize_task, format_response_task],
-                    verbose=True,
-                    process=Process.sequential
-                )
-                
-                logger.info("Crew setup complete")
-            except Exception as e:
-                st.error(f"Error setting up crew: {e}")
-                st.stop()
-
+# Process query function (replacing CrewAI functionality)
 def process_query(query: str) -> str:
-    """Process a user query using CrewAI."""
-    # Set up the crew if not already done
-    setup_crew()
-    
+    """Process a user query using vector search and LLM."""
     # Check if query is in Tamil and translate if needed
     original_language = detect_language(query)
     english_query = query
@@ -496,17 +241,33 @@ def process_query(query: str) -> str:
         with st.spinner("Translating your query from Tamil to English..."):
             english_query = translate_text(query, "tamil", "english")
     
+    # Make sure QA chain is initialized
+    if st.session_state.qa_chain is None:
+        create_qa_chain()
+    
     # Process the query
-    with st.spinner("Processing your query..."):
+    with st.spinner("Searching legal documents..."):
         try:
-            result = st.session_state.crew.kickoff(inputs={"query": english_query})
+            # Search through documents
+            document_results = st.session_state.qa_chain({"query": english_query})
+            document_answer = document_results["result"]
+            
+            # Get sources
+            sources_text = "\n\nSources:\n"
+            for i, doc in enumerate(document_results["source_documents"]):
+                source = doc.metadata.get("source", "Unknown")
+                page = doc.metadata.get("page", "Unknown")
+                sources_text += f"{i+1}. {source}, Page {page}\n"
+            
+            # Format final response
+            response = f"{document_answer}\n{sources_text}"
             
             # Translate response back to Tamil if original query was in Tamil
             if original_language == "tamil":
                 with st.spinner("Translating response to Tamil..."):
-                    result = translate_text(result, "english", "tamil")
+                    response = translate_text(response, "english", "tamil")
             
-            return result
+            return response
         except Exception as e:
             logger.error(f"Error processing query: {e}")
             error_msg = "Sorry, I encountered an error while processing your query."
